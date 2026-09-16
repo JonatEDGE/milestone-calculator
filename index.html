@@ -1,0 +1,338 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Course Milestone Calculator</title>
+
+<!-- Tailwind (utility classes only, matches the artifact version) -->
+<script src="https://cdn.tailwindcss.com"></script>
+
+<!-- React (UMD builds, no npm/bundler needed) -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+
+
+<!-- SheetJS: reads/writes the .xlsx files -->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" crossorigin></script>
+
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+
+<style>
+  html, body, #root { min-height: 100%; margin: 0; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script>
+"use strict";
+const { useState, useMemo, useRef } = React;
+const INK = "#1E2A2F";
+const BG = "#EEF0EC";
+const SURFACE = "#FFFFFF";
+const RULE = "#C9CFC6";
+const TEAL = "#1F6F63";
+const OCHRE = "#B8862E";
+const MUTED = "#6B7570";
+/* ---------- Small inline icon set (stand-ins for lucide-react) ---------- */
+function IconBase({ children, size = 15 }) {
+    return (React.createElement("svg", { width: size, height: size, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: "2", strokeLinecap: "round", strokeLinejoin: "round" }, children));
+}
+const Plus = (p) => React.createElement(IconBase, { ...p },
+    React.createElement("line", { x1: "12", y1: "5", x2: "12", y2: "19" }),
+    React.createElement("line", { x1: "5", y1: "12", x2: "19", y2: "12" }));
+const Trash2 = (p) => React.createElement(IconBase, { ...p },
+    React.createElement("polyline", { points: "3 6 5 6 21 6" }),
+    React.createElement("path", { d: "M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" }),
+    React.createElement("path", { d: "M10 11v6" }),
+    React.createElement("path", { d: "M14 11v6" }),
+    React.createElement("path", { d: "M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" }));
+const Download = (p) => React.createElement(IconBase, { ...p },
+    React.createElement("path", { d: "M12 3v12" }),
+    React.createElement("polyline", { points: "7 11 12 16 17 11" }),
+    React.createElement("path", { d: "M5 20h14" }));
+const Upload = (p) => React.createElement(IconBase, { ...p },
+    React.createElement("path", { d: "M12 21V9" }),
+    React.createElement("polyline", { points: "7 13 12 8 17 13" }),
+    React.createElement("path", { d: "M5 4h14" }));
+const RotateCcw = (p) => React.createElement(IconBase, { ...p },
+    React.createElement("path", { d: "M3 12a9 9 0 1 0 3-6.7" }),
+    React.createElement("polyline", { points: "3 3 3 8 8 8" }));
+const GripVertical = (p) => (React.createElement(IconBase, { ...p },
+    React.createElement("circle", { cx: "9", cy: "6", r: "1" }),
+    React.createElement("circle", { cx: "9", cy: "12", r: "1" }),
+    React.createElement("circle", { cx: "9", cy: "18", r: "1" }),
+    React.createElement("circle", { cx: "15", cy: "6", r: "1" }),
+    React.createElement("circle", { cx: "15", cy: "12", r: "1" }),
+    React.createElement("circle", { cx: "15", cy: "18", r: "1" })));
+/* ------------------------------------------------------------------------ */
+const DEFAULT_MILESTONES = [
+    { id: 1, name: "Kickoff meeting", pct: 5 },
+    { id: 2, name: "Course outline & objectives due (faculty)", pct: 15 },
+    { id: 3, name: "Module content due — round 1 (faculty)", pct: 30 },
+    { id: 4, name: "Draft review & feedback", pct: 45 },
+    { id: 5, name: "Module content due — round 2 / revisions (faculty)", pct: 60 },
+    { id: 6, name: "Full draft complete", pct: 75 },
+    { id: 7, name: "Final faculty sign-off", pct: 90 },
+    { id: 8, name: "Course ready for launch", pct: 100 },
+];
+function toISO(d) { return d.toISOString().slice(0, 10); }
+function parseISO(s) {
+    const [y, m, d] = s.split("-").map(Number);
+    return new Date(Date.UTC(y, m - 1, d));
+}
+function fmtDate(d) {
+    return d.toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+function dateFromPct(start, due, pct) {
+    const s = parseISO(start).getTime();
+    const e = parseISO(due).getTime();
+    return new Date(s + (pct / 100) * (e - s));
+}
+function pctFromDate(start, due, dateStr) {
+    const s = parseISO(start).getTime();
+    const e = parseISO(due).getTime();
+    const d = parseISO(dateStr).getTime();
+    if (e === s)
+        return 0;
+    return Math.max(0, Math.min(100, ((d - s) / (e - s)) * 100));
+}
+let nextId = 100;
+function MilestoneCalculator() {
+    const [startDate, setStartDate] = useState(() => toISO(new Date()));
+    const [dueDate, setDueDate] = useState(() => {
+        const d = new Date();
+        d.setUTCDate(d.getUTCDate() + 90);
+        return toISO(d);
+    });
+    const [milestones, setMilestones] = useState(DEFAULT_MILESTONES);
+    const [courseTitle, setCourseTitle] = useState("");
+    const [fileError, setFileError] = useState("");
+    const fileInputRef = useRef(null);
+    const [dragId, setDragId] = useState(null);
+    const [overId, setOverId] = useState(null);
+    const sorted = useMemo(() => [...milestones].sort((a, b) => a.pct - b.pct), [milestones]);
+    const rangeValid = parseISO(dueDate) > parseISO(startDate);
+    function updateMilestone(id, patch) {
+        setMilestones((ms) => ms.map((m) => (m.id === id ? { ...m, ...patch } : m)));
+    }
+    function updateDateDirect(id, newDateStr) {
+        updateMilestone(id, { pct: pctFromDate(startDate, dueDate, newDateStr) });
+    }
+    function removeMilestone(id) {
+        setMilestones((ms) => ms.filter((m) => m.id !== id));
+    }
+    function addMilestone() {
+        nextId += 1;
+        const maxPct = milestones.length ? Math.max(...milestones.map((m) => m.pct)) : 0;
+        const pct = milestones.length === 0 ? 50 : Math.min(100, maxPct + 10);
+        setMilestones((ms) => [...ms, { id: nextId, name: "New deliverable", pct }]);
+    }
+    function reorder(draggedId, targetId) {
+        if (draggedId === targetId)
+            return;
+        const currentIds = sorted.map((m) => m.id);
+        const slots = sorted.map((m) => m.pct);
+        const withoutDragged = currentIds.filter((id) => id !== draggedId);
+        const targetIndex = withoutDragged.indexOf(targetId);
+        const newIds = [...withoutDragged.slice(0, targetIndex), draggedId, ...withoutDragged.slice(targetIndex)];
+        const pctById = {};
+        newIds.forEach((id, idx) => { pctById[id] = slots[idx]; });
+        setMilestones((ms) => ms.map((m) => (pctById[m.id] !== undefined ? { ...m, pct: pctById[m.id] } : m)));
+    }
+    function resetTemplate() { setMilestones(DEFAULT_MILESTONES); }
+    function handleDownload() {
+        const wb = XLSX.utils.book_new();
+        const rows = [
+            ["Milestone Calculator"],
+            ["Course / Project", courseTitle || ""],
+            ["Start Date", startDate],
+            ["Due Date", dueDate],
+            [],
+            ["Milestone", "% of Timeline", "Due Date"],
+            ...sorted.map((m) => [m.name, Math.round(m.pct * 100) / 100, toISO(dateFromPct(startDate, dueDate, m.pct))]),
+        ];
+        const ws = XLSX.utils.aoa_to_sheet(rows);
+        ws["!cols"] = [{ wch: 45 }, { wch: 16 }, { wch: 14 }];
+        XLSX.utils.book_append_sheet(wb, ws, "Milestones");
+        const name = (courseTitle || "milestone-calculator").trim().replace(/[^a-z0-9\-_ ]/gi, "").replace(/\s+/g, "-").toLowerCase();
+        XLSX.writeFile(wb, `${name || "milestone-calculator"}.xlsx`);
+    }
+    function handleUploadClick() {
+        var _a;
+        setFileError("");
+        (_a = fileInputRef.current) === null || _a === void 0 ? void 0 : _a.click();
+    }
+    function handleFile(e) {
+        var _a;
+        const file = (_a = e.target.files) === null || _a === void 0 ? void 0 : _a[0];
+        if (!file)
+            return;
+        setFileError("");
+        const reader = new FileReader();
+        reader.onload = (ev) => {
+            try {
+                const data = new Uint8Array(ev.target.result);
+                const wb = XLSX.read(data, { type: "array" });
+                const ws = wb.Sheets[wb.SheetNames[0]];
+                const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: false });
+                let newStart = null, newDue = null, newTitle = "";
+                let headerRowIdx = -1;
+                rows.forEach((r, i) => {
+                    const label = (r[0] || "").toString().trim().toLowerCase();
+                    if (label === "start date")
+                        newStart = (r[1] || "").toString().slice(0, 10);
+                    if (label === "due date")
+                        newDue = (r[1] || "").toString().slice(0, 10);
+                    if (label === "course / project")
+                        newTitle = (r[1] || "").toString();
+                    if (label === "milestone")
+                        headerRowIdx = i;
+                });
+                if (!newStart || !newDue || headerRowIdx === -1) {
+                    setFileError("Couldn't find the expected layout in this file. Make sure it's a file downloaded from this calculator.");
+                    return;
+                }
+                const parsedMilestones = [];
+                for (let i = headerRowIdx + 1; i < rows.length; i++) {
+                    const r = rows[i];
+                    if (!r || !r[0])
+                        continue;
+                    const name = r[0].toString();
+                    let pct = r[1] !== undefined && r[1] !== "" ? Number(r[1]) : null;
+                    const dateStr = r[2] ? r[2].toString().slice(0, 10) : null;
+                    if (pct === null && dateStr) {
+                        pct = pctFromDate(newStart, newDue, dateStr);
+                    }
+                    else if (dateStr) {
+                        const derivedFromDate = pctFromDate(newStart, newDue, dateStr);
+                        if (Math.abs(derivedFromDate - pct) > 0.01)
+                            pct = derivedFromDate;
+                    }
+                    nextId += 1;
+                    parsedMilestones.push({ id: nextId, name, pct: pct !== null && pct !== void 0 ? pct : 0 });
+                }
+                if (parsedMilestones.length === 0) {
+                    setFileError("No milestone rows found in this file.");
+                    return;
+                }
+                setStartDate(newStart);
+                setDueDate(newDue);
+                setCourseTitle(newTitle);
+                setMilestones(parsedMilestones);
+            }
+            catch (err) {
+                setFileError("Couldn't read that file. Please upload an .xlsx exported from this calculator.");
+            }
+        };
+        reader.readAsArrayBuffer(file);
+        e.target.value = "";
+    }
+    return (React.createElement("div", { style: { background: BG, minHeight: "100vh", fontFamily: "'IBM Plex Sans', sans-serif", color: INK }, className: "w-full p-4 sm:p-8" },
+        React.createElement("div", { className: "max-w-5xl mx-auto" },
+            React.createElement("div", { className: "mb-8" },
+                React.createElement("h1", { style: { fontFamily: "'Fraunces', serif", fontWeight: 600 }, className: "text-3xl sm:text-4xl mb-2" }, "Course milestone calculator"),
+                React.createElement("p", { style: { color: MUTED }, className: "text-sm sm:text-base max-w-xl" }, "Set a start and due date, chunk the content deliverables in between, and export a spreadsheet your faculty can see \u2014 and you can re-upload whenever the timeline shifts.")),
+            React.createElement("div", { className: "grid grid-cols-1 md:grid-cols-3 gap-6 mb-8" },
+                React.createElement("div", { style: { background: SURFACE, border: `1px solid ${RULE}` }, className: "rounded p-5 md:col-span-1" },
+                    React.createElement("label", { className: "block text-xs uppercase tracking-wide mb-1", style: { color: MUTED, letterSpacing: "0.06em" } }, "Course / project name"),
+                    React.createElement("input", { type: "text", value: courseTitle, onChange: (e) => setCourseTitle(e.target.value), placeholder: "e.g. BIOL 210", style: { borderColor: RULE, fontFamily: "'IBM Plex Sans', sans-serif" }, className: "w-full border rounded px-3 py-2 text-sm mb-4 focus:outline-none focus:ring-2" }),
+                    React.createElement("label", { className: "block text-xs uppercase tracking-wide mb-1", style: { color: MUTED, letterSpacing: "0.06em" } }, "Project start date"),
+                    React.createElement("input", { type: "date", value: startDate, onChange: (e) => setStartDate(e.target.value), style: { borderColor: RULE, fontFamily: "'IBM Plex Mono', monospace" }, className: "w-full border rounded px-3 py-2 text-sm mb-4" }),
+                    React.createElement("label", { className: "block text-xs uppercase tracking-wide mb-1", style: { color: MUTED, letterSpacing: "0.06em" } }, "Course due date"),
+                    React.createElement("input", { type: "date", value: dueDate, onChange: (e) => setDueDate(e.target.value), style: { borderColor: RULE, fontFamily: "'IBM Plex Mono', monospace" }, className: "w-full border rounded px-3 py-2 text-sm mb-2" }),
+                    !rangeValid && (React.createElement("p", { className: "text-xs mb-2", style: { color: "#A13E3E" } }, "Due date must be after the start date.")),
+                    React.createElement("div", { className: "flex gap-2 mt-5" },
+                        React.createElement("button", { onClick: handleDownload, disabled: !rangeValid, style: { background: TEAL, opacity: rangeValid ? 1 : 0.5 }, className: "flex items-center gap-2 text-white text-sm rounded px-3 py-2 flex-1 justify-center" },
+                            React.createElement(Download, { size: 15 }),
+                            " Download .xlsx")),
+                    React.createElement("div", { className: "flex gap-2 mt-2" },
+                        React.createElement("button", { onClick: handleUploadClick, style: { borderColor: RULE }, className: "flex items-center gap-2 text-sm rounded px-3 py-2 flex-1 justify-center border" },
+                            React.createElement(Upload, { size: 15 }),
+                            " Upload .xlsx"),
+                        React.createElement("input", { type: "file", accept: ".xlsx,.xls", ref: fileInputRef, onChange: handleFile, className: "hidden" })),
+                    fileError && React.createElement("p", { className: "text-xs mt-2", style: { color: "#A13E3E" } }, fileError),
+                    React.createElement("button", { onClick: resetTemplate, className: "flex items-center gap-1.5 text-xs mt-5", style: { color: MUTED } },
+                        React.createElement(RotateCcw, { size: 12 }),
+                        " Reset to default milestones")),
+                React.createElement("div", { style: { background: SURFACE, border: `1px solid ${RULE}` }, className: "rounded p-5 md:col-span-2" },
+                    React.createElement("div", { className: "flex items-center justify-between mb-4" },
+                        React.createElement("h2", { style: { fontFamily: "'Fraunces', serif" }, className: "text-lg" }, "Content deliverables"),
+                        React.createElement("button", { onClick: addMilestone, className: "flex items-center gap-1 text-sm", style: { color: TEAL } },
+                            React.createElement(Plus, { size: 15 }),
+                            " Add deliverable")),
+                    React.createElement(Timeline, { startDate: startDate, dueDate: dueDate, milestones: sorted, valid: rangeValid }),
+                    React.createElement("div", { className: "mt-6 divide-y", style: { borderColor: RULE } },
+                        React.createElement("div", { className: "grid grid-cols-12 gap-2 text-xs pb-2 uppercase tracking-wide", style: { color: MUTED, letterSpacing: "0.05em" } },
+                            React.createElement("div", { className: "col-span-1" }),
+                            React.createElement("div", { className: "col-span-4" }, "Deliverable"),
+                            React.createElement("div", { className: "col-span-2" }, "% of timeline"),
+                            React.createElement("div", { className: "col-span-3" }, "Due date"),
+                            React.createElement("div", { className: "col-span-2" })),
+                        sorted.map((m) => {
+                            const d = rangeValid ? dateFromPct(startDate, dueDate, m.pct) : null;
+                            const isOver = overId === m.id && dragId !== m.id;
+                            return (React.createElement("div", { key: m.id, draggable: true, onDragStart: () => setDragId(m.id), onDragEnter: () => setOverId(m.id), onDragOver: (e) => e.preventDefault(), onDrop: (e) => {
+                                    e.preventDefault();
+                                    if (dragId)
+                                        reorder(dragId, m.id);
+                                    setDragId(null);
+                                    setOverId(null);
+                                }, onDragEnd: () => { setDragId(null); setOverId(null); }, className: "grid grid-cols-12 gap-2 items-center py-2", style: {
+                                    borderColor: RULE,
+                                    background: isOver ? "#F1EEE3" : "transparent",
+                                    opacity: dragId === m.id ? 0.4 : 1,
+                                } },
+                                React.createElement("div", { className: "col-span-1 flex justify-center", style: { cursor: "grab", color: MUTED } },
+                                    React.createElement(GripVertical, { size: 15 })),
+                                React.createElement("div", { className: "col-span-4" },
+                                    React.createElement("input", { type: "text", value: m.name, onChange: (e) => updateMilestone(m.id, { name: e.target.value }), style: { fontFamily: "'IBM Plex Sans', sans-serif" }, className: "w-full text-sm border-b bg-transparent focus:outline-none py-1" })),
+                                React.createElement("div", { className: "col-span-2" },
+                                    React.createElement("input", { type: "number", min: 0, max: 100, value: Math.round(m.pct * 10) / 10, onChange: (e) => updateMilestone(m.id, { pct: Number(e.target.value) }), style: { fontFamily: "'IBM Plex Mono', monospace" }, className: "w-16 text-sm border-b bg-transparent focus:outline-none py-1" })),
+                                React.createElement("div", { className: "col-span-3" },
+                                    React.createElement("input", { type: "date", value: d ? toISO(d) : "", onChange: (e) => updateDateDirect(m.id, e.target.value), style: { fontFamily: "'IBM Plex Mono', monospace" }, className: "w-full text-sm border-b bg-transparent focus:outline-none py-1" })),
+                                React.createElement("div", { className: "col-span-2 text-right" },
+                                    React.createElement("button", { onClick: () => removeMilestone(m.id), style: { color: MUTED } },
+                                        React.createElement(Trash2, { size: 15 })))));
+                        })))),
+            React.createElement("p", { className: "text-xs", style: { color: MUTED } }, "Editing a date directly recalculates its position on the timeline. Editing % recalculates the date. When the project timeline shifts, either update the dates above and re-download, or upload a previously downloaded file to load it back in."))));
+}
+function Timeline({ startDate, dueDate, milestones, valid }) {
+    const [hoverId, setHoverId] = useState(null);
+    if (!valid)
+        return null;
+    const active = milestones.find((m) => m.id === hoverId);
+    return (React.createElement("div", { className: "relative pt-2 pb-10" },
+        React.createElement("div", { className: "flex justify-between text-xs mb-3", style: { color: MUTED, fontFamily: "'IBM Plex Mono', monospace" } },
+            React.createElement("span", null, fmtDate(parseISO(startDate))),
+            React.createElement("span", null, fmtDate(parseISO(dueDate)))),
+        React.createElement("div", { className: "relative h-1 rounded", style: { background: RULE } }, milestones.map((m) => (React.createElement("div", { key: m.id, onMouseEnter: () => setHoverId(m.id), onMouseLeave: () => setHoverId(null), className: "absolute -top-1.5 flex flex-col items-center", style: { left: `${m.pct}%`, transform: "translateX(-50%)", cursor: "default" } },
+            React.createElement("div", { style: {
+                    width: hoverId === m.id ? 12 : 8,
+                    height: hoverId === m.id ? 12 : 8,
+                    borderRadius: "50%",
+                    background: OCHRE,
+                    border: `2px solid ${SURFACE}`,
+                    transition: "width 0.1s, height 0.1s",
+                } }))))),
+        active && (React.createElement("div", { className: "absolute text-xs rounded px-2 py-1 whitespace-nowrap", style: {
+                left: `${active.pct}%`,
+                top: 26,
+                transform: "translateX(-50%)",
+                background: INK,
+                color: SURFACE,
+                fontFamily: "'IBM Plex Mono', monospace",
+                pointerEvents: "none",
+            } },
+            active.name || "Untitled",
+            " \u00B7 ",
+            toISO(dateFromPct(startDate, dueDate, active.pct))))));
+}
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(React.createElement(MilestoneCalculator, null));
+
+</script>
+</body>
+</html>
